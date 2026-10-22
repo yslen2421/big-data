@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reservas de vuelos</title>
+<style>
+  :root { --bg:#f4f6f8; --card:#fff; --ink:#1d2733; --muted:#5b6876; --line:#d8dee5; --accent:#0b5cad; --ok:#1e7d3c; --err:#b3261e; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--ink); }
+  header { background:var(--accent); color:#fff; padding:16px; }
+  header h1 { margin:0; font-size:1.25rem; }
+  header a { color:#fff; font-size:.9rem; }
+  main { max-width:760px; margin:0 auto; padding:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:16px; }
+  h2 { font-size:1.05rem; margin:0 0 12px; }
+  form.grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap:12px; align-items:end; }
+  label { display:flex; flex-direction:column; font-size:.85rem; color:var(--muted); gap:4px; }
+  input, select { font:inherit; padding:8px; border:1px solid var(--line); border-radius:6px; color:var(--ink); }
+  button { font:inherit; padding:9px 14px; border:0; border-radius:6px; background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:default; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:8px; border-bottom:1px solid var(--line); font-size:.95rem; }
+  th { color:var(--muted); font-weight:600; font-size:.85rem; }
+  .msg { margin-top:8px; font-size:.95rem; }
+  .err { color:var(--err); }
+  .ok { color:var(--ok); }
+  .hidden { display:none; }
+  #origin, #destination { text-transform:uppercase; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+  .chip { background:#fff; color:var(--accent); border:1px solid var(--accent); border-radius:16px; padding:5px 12px; font-size:.85rem; }
+  .chip:hover { background:#eaf1fa; }
+  .chip small { color:var(--muted); }
+  .helper { margin-top:12px; font-size:.85rem; color:var(--muted); }
+  #confirmation-id { font-family: ui-monospace, Consolas, monospace; font-weight:600; word-break:break-all; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Reservas de vuelos</h1>
+  <a href="/manager">Panel del gerente</a>
+</header>
+<main>
+  <section class="card">
+    <h2>1. Buscar vuelos</h2>
+    <form id="search-form" class="grid">
+      <label>Origen
+        <input data-testid="search-origin" id="origin" maxlength="3" placeholder="BOG" list="origins" autocomplete="off" required>
+      </label>
+      <label>Destino
+        <input data-testid="search-destination" id="destination" maxlength="3" placeholder="MDE" list="destinations" autocomplete="off" required>
+      </label>
+      <label>Fecha
+        <input data-testid="search-date" id="date" type="date" required>
+      </label>
+      <button data-testid="search-submit" type="submit">Buscar</button>
+    </form>
+    <datalist id="origins"></datalist>
+    <datalist id="destinations"></datalist>
+    <div id="routes-box" class="helper hidden">Rutas con vuelos disponibles (haz clic para escoger una):
+      <div id="route-chips" class="chips"></div>
+    </div>
+    <div id="dates-box" class="helper hidden">Fechas con vuelos para <strong id="dates-route"></strong> (haz clic para buscar):
+      <div id="date-chips" class="chips"></div>
+    </div>
+    <p id="search-msg" class="msg"></p>
+  </section>
+
+  <section id="results-card" class="card hidden">
+    <h2>2. Resultados</h2>
+    <table>
+      <thead><tr><th>Vuelo</th><th>Ruta</th><th>Fecha</th><th>Cupos</th><th>Precio</th><th></th></tr></thead>
+      <tbody id="results"></tbody>
+    </table>
+  </section>
+
+  <section id="passenger-card" class="card hidden">
+    <h2>3. Datos del pasajero</h2>
+    <p>Vuelo seleccionado: <strong id="selected-flight"></strong></p>
+    <form id="reserve-form" class="grid">
+      <label>Nombre del pasajero
+        <input data-testid="passenger-name" id="passenger" required>
+      </label>
+      <label>Clase
+        <select id="fare">
+          <option value="ECONOMY">Económica</option>
+          <option value="BUSINESS">Ejecutiva</option>
+        </select>
+      </label>
+      <button data-testid="confirm-submit" type="submit">Confirmar reserva</button>
+    </form>
+    <p id="reserve-msg" class="msg"></p>
+  </section>
+
+  <section id="confirm-card" class="card hidden">
+    <h2>Reserva confirmada</h2>
+    <p class="ok">Código de reserva:</p>
+    <p><span data-testid="confirmation-id" id="confirmation-id"></span></p>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let selectedFlight = null;
+
+function money(cents) {
+  return "$" + (cents / 100).toLocaleString("es-CO", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}
+
+function show(id, visible) { $(id).classList.toggle("hidden", !visible); }
+
+// ---------- ayudas: rutas y fechas disponibles ----------
+let routes = [];
+const MESES = ["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
+function niceDate(iso) {
+  const [y, m, d] = iso.split("-");
+  return `${parseInt(d)} ${MESES[parseInt(m) - 1]} ${y}`;
+}
+function fillList(id, values) {
+  $(id).innerHTML = "";
+  for (const v of values) { const o = document.createElement("option"); o.value = v; $(id).appendChild(o); }
+}
+function refreshDestinations() {
+  const o = $("origin").value.trim().toUpperCase();
+  const dests = routes.filter(r => !o || r.origin === o).map(r => r.destination);
+  fillList("destinations", [...new Set(dests)]);
+}
+async function loadRoutes() {
+  try {
+    const res = await fetch("/flights/routes");
+    if (!res.ok) return;
+    routes = await res.json();
+    fillList("origins", [...new Set(routes.map(r => r.origin))]);
+    refreshDestinations();
+    const box = $("route-chips");
+    box.innerHTML = "";
+    for (const r of routes) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "chip"; b.textContent = r.route;
+      b.addEventListener("click", () => {
+        $("origin").value = r.origin; $("destination").value = r.destination;
+        refreshDestinations(); loadDates();
+      });
+      box.appendChild(b);
+    }
+    show("routes-box", routes.length > 0);
+  } catch (e) { /* las ayudas son opcionales */ }
+}
+let datesTimer = null;
+async function loadDates() {
+  const o = $("origin").value.trim().toUpperCase();
+  const d = $("destination").value.trim().toUpperCase();
+  if (o.length !== 3 || d.length !== 3) { show("dates-box", false); return; }
+  try {
+    const res = await fetch("/flights/dates?" + new URLSearchParams({ origin: o, destination: d }));
+    if (!res.ok) { show("dates-box", false); return; }
+    const dates = await res.json();
+    $("dates-route").textContent = `${o} → ${d}`;
+    const box = $("date-chips");
+    box.innerHTML = "";
+    for (const x of dates) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "chip";
+      b.innerHTML = `${niceDate(x.date)} <small>· ${x.seats} cupo(s)</small>`;
+      b.addEventListener("click", () => {
+        $("date").value = x.date;
+        $("search-form").requestSubmit();
+      });
+      box.appendChild(b);
+    }
+    if (!dates.length) box.textContent = "No hay vuelos con cupo para esta ruta.";
+    show("dates-box", true);
+  } catch (e) { show("dates-box", false); }
+}
+function scheduleDates() { clearTimeout(datesTimer); datesTimer = setTimeout(loadDates, 300); }
+$("origin").addEventListener("input", () => { refreshDestinations(); scheduleDates(); });
+$("destination").addEventListener("input", scheduleDates);
+loadRoutes();
+
+$("search-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const origin = $("origin").value.trim().toUpperCase();
+  const destination = $("destination").value.trim().toUpperCase();
+  const date = $("date").value;
+  show("passenger-card", false); show("confirm-card", false);
+  $("search-msg").textContent = "Buscando...";
+  $("search-msg").className = "msg";
+  try {
+    const q = new URLSearchParams({ origin, destination, date });
+    const res = await fetch("/flights/search?" + q);
+    if (!res.ok) throw new Error("Revisa los datos: origen y destino de 3 letras y una fecha válida.");
+    const flights = await res.json();
+    const tbody = $("results");
+    tbody.innerHTML = "";
+    for (const f of flights) {
+      const tr = document.createElement("tr");
+      tr.setAttribute("data-testid", "flight-row");
+      for (const v of [f.flight_id, f.route, f.flight_date, f.seats_available, money(f.price_cents)]) {
+        const td = document.createElement("td"); td.textContent = v; tr.appendChild(td);
+      }
+      const td = document.createElement("td");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = "Reservar";
+      btn.setAttribute("data-testid", "reserve-button");
+      btn.addEventListener("click", () => selectFlight(f));
+      td.appendChild(btn); tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+    show("results-card", flights.length > 0);
+    $("search-msg").textContent = flights.length ? `${flights.length} vuelo(s) encontrado(s).` : "No hay vuelos con cupo para esa búsqueda.";
+  } catch (err) {
+    show("results-card", false);
+    $("search-msg").textContent = err.message;
+    $("search-msg").className = "msg err";
+  }
+});
+
+function selectFlight(f) {
+  selectedFlight = f;
+  $("selected-flight").textContent = `${f.flight_id} (${f.route}, ${f.flight_date})`;
+  $("passenger").value = "";
+  $("reserve-msg").textContent = "";
+  show("confirm-card", false);
+  show("passenger-card", true);
+  $("passenger").focus();
+}
+
+$("reserve-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = e.submitter || document.querySelector('[data-testid="confirm-submit"]');
+  btn.disabled = true;
+  $("reserve-msg").textContent = "Reservando...";
+  $("reserve-msg").className = "msg";
+  try {
+    const res = await fetch("/reservations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        flight_id: selectedFlight.flight_id,
+        passenger_name: $("passenger").value.trim(),
+        fare_class: $("fare").value,
+      }),
+    });
+    if (res.status === 409) throw new Error("Lo sentimos, el vuelo ya no tiene cupos.");
+    if (res.status === 404) throw new Error("El vuelo no existe.");
+    if (!res.ok) throw new Error("No se pudo crear la reserva (código " + res.status + ").");
+    const r = await res.json();
+    $("confirmation-id").textContent = r.reservation_id;
+    $("reserve-msg").textContent = "";
+    show("passenger-card", false);
+    show("confirm-card", true);
+    loadDates(); loadRoutes();   // actualiza los cupos que muestran las ayudas
+  } catch (err) {
+    $("reserve-msg").textContent = err.message;
+    $("reserve-msg").className = "msg err";
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
